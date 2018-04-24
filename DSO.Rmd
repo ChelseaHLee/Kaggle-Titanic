@@ -1,0 +1,729 @@
+---
+title: 'Kaggle: Titanic EDA'
+date: "April 23, 2018"
+author: "Chelsea Lee"
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+# Outline
+[Read in dataset and load libraries](#read-in-dataset-and-load-libraries)
+
+[Handling Missing Data](#handling-missing-data)
+
+[Remove Missing data](#remove-missing-data)
+
+[Imputing Missing data](#imputing-missing-data)
+
+[Factorizing Categorical Variables for future EDA visualizations](#factorizing-categorical-variables-for-future-eda-visualizations)
+
+[Ticket](#ticket)
+
+[Fare](#fare)
+
+[Sex and Companion](#sex-and-companion)
+
+[Parch and Sibsp](#parch-and-sibsp)
+
+[Make hasCompanions Feature](#make-hascompanions-feature)
+
+[Create isSmallFamily Variable](#create-issmallfamily-variable)
+
+[Embarked](#embarked)
+
+[Embarked and Fare_cat](#embarked-and-fare_cat)
+
+[Age](#age)
+
+[Name](#name)
+
+[Final Checks](#final-checks)
+
+# Read in Dataset and Load Libraries
+```{r, echo=TRUE}
+setwd("C:/Users/Chelsea Lee/Dropbox/Kaggle Stuff/Titanic")
+
+library(ggplot2)
+library(dplyr)
+library(missMDA)
+library(dummies)
+library(stringr)
+
+train <- read.csv("train.csv", stringsAsFactors = F )
+test <- read.csv("test.csv", stringsAsFactors = F)
+
+train$isTrain <- 1
+test$isTrain <- 0
+test$Survived <- NA
+
+```
+
+```{r}
+
+#combine all
+all <- rbind(train, test)
+head(all)
+```
+
+
+# Handling Missing Data
+```{r}
+#label which entry is NA, then find the mean of all columns
+#(true/false can be regarded as 1/0)
+
+#find all character columns
+character_col <- unlist(lapply(all, is.character))
+#find indexes of columns that are character
+char_ind <- which(character_col)
+
+#loop through all character columns and change "" to NA
+for (char_col in char_ind){
+  regexp <- all[,char_col] == ""
+  all[regexp,char_col] <- NA
+}
+
+#Do not look at target variable. Testing is missing Survived column. 
+missing_dat <- colMeans(is.na(all[,colnames(all)!= "Survived"]))
+missing_dat <- sapply(missing_dat, function(x){round(x,4)})
+missing_dat <- as.data.frame(missing_dat)
+colnames(missing_dat)[1] <- "n"
+missing_dat$var <- rownames(missing_dat)
+
+#reset row indexes
+rownames(missing_dat) <- NULL
+
+#Bar graph of missing data
+ggplot(missing_dat, aes(x = reorder(var, n), y = n)) +
+    geom_bar(stat = "identity", fill = "blue") +
+    xlab("Variables") +
+    ylab("% of Missing Data") +
+    ggtitle("Missing Data Graph") +
+    coord_flip()  
+```
+
+
+From the above graph, we see only four variables have missing data. We could impute Age, Embarked, and Fare. Cabin has too much missing data (>75%), so this variable will be discarded.
+
+
+# Remove Missing Data
+```{r}
+#If column has more than 50% data missing, remove 
+missing_dat[which(missing_dat$n > 0.5),] #We are dropping cabin! 
+
+```
+
+```{r}
+
+good_col <- c(missing_dat$var[which(missing_dat$n  < 0.5)],"Survived")
+all <- all[,good_col]
+
+```
+
+
+
+# Imputing Missing Data
+```{r}
+#Multiple imputation on quantitative data
+all_numeric <- all[,!(colnames(all) %in% c("PassengerId", "Name", "TicketNumber",
+                                         "Sex", "Ticket", "Embarked"))]
+
+#Estimate the number of dimensions to compute
+nbdim <- estim_ncpPCA(all_numeric)
+num.imputed <- MIPCA(all_numeric, ncp = nbdim$ncp, nboot = 1000)
+
+#Create df of imputed values
+num_imputed <- num.imputed$res.MI[[1]]
+
+#Extract imputed values and use it in dataset.
+all$Age <- num_imputed$Age
+all$Fare <- num_imputed$Fare
+
+##No need to impute Embarked, the only categorical variable with missing data, becasue there are only two missing values
+#Impute with most common port
+print("Frequency Table of Ports")
+table(all$Embarked)
+```
+
+```{r}
+#change NA to most common port
+all$Embarked[is.na(all$Embarked)] <- "S"
+
+#Don't look at target variable
+missing_dat_preclean <- colMeans(is.na(all[colnames(all) != "Survived" ]))
+missing_dat_preclean
+paste("Total percentage of missing data:",sum(missing_dat_preclean), "%") 
+
+
+```
+0%! Let's go do some EDA!
+
+
+# Factorizing Categorical Variables for future EDA visualizations
+Also, change 0/1 in target variable to "Died"/"Survived". Change back to numerics for modeling after EDA
+```{r}
+#####Factorizing variables
+all$Survived <- ifelse(all$Survived == 1, "Survived", "Died")
+shouldBeCategorical <- c("Pclass", "Embarked", "Survived", "Sex")
+for(col in shouldBeCategorical) {
+  all[[col]] <- as.factor(all[[col]])
+}
+
+#print structure to double check if variables are stored as char, int, or factor appropriately
+str(all)
+```
+
+
+
+# Ticket
+There are alpha numeric codes in ticket and varying digit lengths.
+Investigate if there's a correlation between digit length of ticket number and survival
+```{r}
+#make TicketNumber feature
+all$TicketNumber <- gsub("([A-Za-z///.0-9]+) ","",all$Ticket)
+
+#make TicketLen feature
+all$TicketLen <- nchar(all$TicketNumber)
+
+#make frequency table of ticket number digit lengths and passenger class
+ticketnumlen_pclass <- all[all$isTrain == 1,] %>%
+  group_by(TicketLen, Pclass) %>%
+  count(Survived) 
+
+#Graph 
+ggplot(ticketnumlen_pclass, aes(x =factor(TicketLen), y = n, fill = factor(Pclass))) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  scale_fill_brewer(palette = "Set1") +
+  facet_grid(~Survived) +
+  theme_minimal() +
+  xlab("Length of Digits in Ticket") + 
+  ylab("Count of Survived") +
+  guides(fill=guide_legend(title="Passenger Classes"))
+
+```
+
+Seems that third class passengers with four or 6 digits long have a higher chance of dying. Whereas, first class passengers with 5 digits long have a higher chance of survival.
+
+
+# Fare
+```{r}
+hist(all$Fare,main = "Histogram of Fares", xlab = "Fare Amount", col = "green")
+#there are negative fares
+```
+```{r}
+#change negative fare to median of fare
+all$Fare[all$Fare < 0] <- median(all$Fare)
+
+#side by side hist
+#Only look at training set (Testing does not have Survived)
+ggplot(all[all$isTrain ==1, ], aes(Fare, fill = Survived)) + 
+  geom_histogram(position= "identity") +
+  facet_grid(~Survived) + 
+  ylab("Passenger Count") +
+  ggtitle("Fare Distributions Among Passengers")
+```
+
+There seems to be differences in fare distributions. 
+Map overlapping histograms for closer analysis
+```{r}
+#overlapping hist
+ggplot(train) +
+  geom_histogram(data = subset(train, Survived == 0), aes(Fare, fill = "red"),  alpha = 0.2, bins = 10) +
+  geom_histogram(data = subset(train, Survived == 1), aes(Fare, fill = "blue"),  alpha = 0.2, bins = 10) +
+  scale_fill_manual(name = "Survived", values = c("red", "blue"), labels = c("Died", "Survived")) +
+  ylab("Passenger Count") +
+  ggtitle("Fare Distributions")
+```
+
+```{r}
+#categorize fares
+#DO NOT use cuts on entire data. Use cuts derived from training and impose them on testing
+cuts <- quantile(all[all$isTrain ==1,]$Fare, probs = seq(0,1,0.20), na.rm = T)
+cuts <- round(cuts,2) #NEED TO ROUND. or else factor will just round decimal down.
+print("Bins to categorze fares")
+cuts
+```
+
+```{r}
+
+all$Fare_cat <- factor(cut(all$Fare, cuts, labels = seq(1,5,1),
+                           include.lowest = T, right = T))
+
+fare_cat_table <- as.data.frame(table("Fare_cat" = all[all$isTrain == 1,]$Fare_cat,
+                        "Survived" = train$Survived))
+head(fare_cat_table)
+```
+```{r}
+print("Frequency table of fare categories")
+fare_survived <- table("fare_cat" = all$Fare_cat, "Survived" = all$Survived)
+fare_survived
+summary(fare_survived) #Obvious significant association
+```
+
+```{r}
+#make labels for graph
+fare_cat_labels <- c("<$7.85", "$7.86 - $10.50", "10.51 - $21.70", "$21.71 - $36.69", "$36.69 - Max")
+
+ggplot(all[all$isTrain == 1, ], aes(x = factor(Fare_cat, labels = fare_cat_labels), fill = Survived)) + 
+  geom_bar(stat = "count", position = "identity") +
+  facet_grid(~Survived) + 
+  xlab("Fare Categories") +
+  ylab("Count of Passengers") +
+  ggtitle("Comparison of Fare Categories") + 
+  guides(fill=guide_legend(title="Survived")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust =1))
+```
+```{r}
+#Row percentages per fare category. See the apparent gap
+#make relative proportion 
+fare_prop_survived <- prop.table(fare_survived, margin = 1)
+fare_prop_survived
+```
+
+# Sex and Companion
+```{r}
+sex_sur <- table(all$Sex, all$Survived)
+sex_sur
+summary(sex_sur) #significant association
+```
+
+```{r}
+ggplot(all[all$isTrain == 1,], aes(x = Sex, fill = Survived)) +
+  geom_bar(stat ="count", position = "identity") + 
+  facet_grid(~Survived) + 
+  ggtitle("Comparing Survival Counts by Gender") +
+  ylab("Passenger Count") +
+  guides(fill=guide_legend(title="Survived"))
+
+```
+
+Many more males died than females.
+
+# Parch and Sibsp
+```{r}
+parch_sur <- table("Number of Parents/Children"= all$Parch, all$Survived)
+parch_sur
+summary(parch_sur) #too significant
+```
+```{r}
+
+ggplot(all[all$isTrain == 1,], aes(x = Parch, fill = Survived)) +
+  geom_bar(stat ="count", position = "identity") + 
+  facet_grid(~Survived) + 
+  xlab("Number of Parents/Children") + 
+  ylab("Passenger Count") +
+  ggtitle("Comparing Survival Rate by # of Parents/Children")+
+  guides(fill=guide_legend(title="Survived"))
+
+```
+
+Very similar distribution...seems not informative.
+```{r}
+ggplot(all[all$isTrain == 1,], aes(x = SibSp, fill = Survived)) +
+  geom_bar(stat ="count", position = "identity") + 
+  facet_grid(~Survived) + 
+  xlab("Number of Siblings/Spouses") + ylab("Passenger Count") +
+  ggtitle("Comparing Survival Rate by # of Siblings/Spouses")+
+  guides(fill=guide_legend(title="Survived"))
+
+```
+
+Again, very similar distribution. Combine both variables to make 'Companions' feature
+
+# Make hasCompanions Feature
+1 if passenger traveled with a companion
+0 if passenger traveled alone
+```{r}
+all$Companions <- all$Parch + all$SibSp
+#make dummy variable
+all$hasCompanion <- as.numeric(all$Companions > 0)
+
+ggplot(all[all$isTrain == 1,], aes(x = hasCompanion, fill = Survived)) +
+  geom_bar(stat ="count", position = "identity") + 
+  facet_grid(~Survived) + 
+  xlab("Solo Traveler (0) or Traveled with Companions (1)") +  ylab("Passenger Count") +
+  ggtitle("Comparing Survival Rate Among Solo and Non-Solo Travelers")+
+  guides(fill=guide_legend(title="Survived")) 
+```
+
+No distinction between solo traveler or those who traveled with companions among those survived. Take a closer look if this variable is correlated with other variables.
+
+```{r}
+####See if having a companion is interacting with gender. interaction terms. 
+#table(all$Sex, hasCompanion = all$hasCompanion, "Survived" = all$Survived)
+
+ggplot(all[all$isTrain == 1,], aes(x = factor(Sex), fill = factor(hasCompanion, labels = c("Solo", "Traveled w/ Comp.")))) +
+  geom_bar(stat ="count", position = "dodge") + 
+  scale_fill_brewer(palette = "Set1") +
+  facet_grid(~Survived) + 
+  xlab("Gender of Passenger") +  ylab("Passenger Count") +
+  ggtitle("Comparing Survival Rate by Solo and Non-Solo Travelers by Gender")+
+  guides(fill=guide_legend(title="Has Companion or Not"))
+```
+```{r}
+#investigate number companions closely to see if we can see more patterns
+table(all$Companions, all$Survived)
+
+```
+
+Seems that those with four or more members are more likely to die. 
+
+# Create isSmallFamily Variable
+0 if traveled with more than 4 members
+1 else
+```{r}
+
+#make new variable isSmallFamily
+
+all$isSmallFamily <- 0
+all$isSmallFamily[all$Companions >= 4] <- 1
+
+prop.table(table(isSmallFamily = all$isSmallFamily, Survived = all$Survived),1)
+```
+# Embarked
+```{r}
+unique(all$Embarked)
+embarked_sur <- table(all$Embarked, all$Survived)
+embarked_sur 
+summary(embarked_sur) #pretty significant.
+```
+```{r}
+ggplot(all[all$isTrain == 1,], aes(x = Embarked, fill = Survived)) +
+  geom_bar(stat ="count", position = "identity") + 
+  facet_grid(~Survived) + 
+  xlab("Port of Embarkment") +  ylab("Passenger Count") +
+  ggtitle("Comparing Survival Rate Location of Embarkment")+
+  guides(fill=guide_legend(title="Survived"))
+```
+
+Again histograms are very similar.. probably some correlation with another variable
+
+```{r}
+#See interaction with Pclass
+ggplot(all[all$isTrain == 1,], aes(x = Embarked, fill = factor(Pclass, labels = c("First", "Second", "Third")))) +
+  geom_bar(stat ="count", position = "stack") + 
+  facet_grid(~Survived) +  
+  ylab("Passenger Count") +
+  ggtitle("Comparing Survival Rate by Location of Embarkment and Passenger Class")+
+  guides(fill=guide_legend(title="Passenger's Class"))
+
+```
+
+Not much associations.
+
+```{r}
+#ANy trends with ticket prices?
+#check the mean ticket price per embarked
+all %>%
+  filter(!is.na(Survived)) %>%
+  group_by(Embarked, Survived) %>%
+  summarise(mean_price = mean(Fare)) %>%
+  ggplot(aes(x = Embarked, y = mean_price, fill = factor(Survived, labels = c("Died", "Survived")))) +
+    geom_bar(stat="identity" ) +
+    xlab("Location of Embarkment") +
+    ylab("Mean Price") +
+    ggtitle("Comparing Survival Rate by Location of Embarkment and Passenger Class")+
+    facet_grid(~Survived) + 
+    guides(fill=guide_legend(title="Survived"))
+```
+
+More expensive tickets embarked at Port C while cheapest itckets were at Port Q. 
+Let's keep embarked varibable for now. 
+
+# Embarked and Fare_cat
+```{r}
+#cuts
+
+ggplot(all[all$isTrain == 1,], aes(x = Embarked, fill = factor(Fare_cat, labels = fare_cat_labels))) +
+  geom_bar(stat = "count", position = "dodge") + 
+  scale_fill_brewer(palette = "Set1") +
+  facet_grid(~Survived) +
+  theme_minimal() +
+  xlab("Embarked Port Name") + 
+  ylab("Passenger Count") +
+  guides(fill=guide_legend(title="Fare Categories"))
+```
+
+Second cheapest itckets (blue) who embareked at Port S who were more likely to die.
+Most expensive tickets(orange) who embarked at Ports C and S were more likely to survive. 
+SEcond most expensive ticket (purple) who embarked at Port S "".
+
+```{r}
+#Make percentages by port
+port_fare_df <- all %>%
+  filter(isTrain == 1, !is.na(Embarked)) %>%
+  group_by(Embarked, Fare_cat, Survived) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  group_by(Embarked) %>%
+  mutate(embarked_sum = sum(n),
+    embarked_percentage = round(n/embarked_sum,2)) 
+port_fare_df
+  
+```
+```{r}
+ggplot(port_fare_df, aes(x = Embarked,y = embarked_percentage, fill = factor(Fare_cat, labels = fare_cat_labels))) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  scale_fill_brewer(palette = "Set1") +
+  facet_grid(~Survived) +
+  theme_minimal() +
+  xlab("Embarked Port Name") + 
+  ylab("% of Passengers by Ports") +
+  guides(fill=guide_legend(title="Fare Categories"))
+```
+
+Almost the same..only emphasizes certain bars.
+Except now, cheapest who embarked at port Q were more likely to die.
+
+
+# Interaction terms with Embarked and Fare_cat
+```{r}
+#Make fifteen total interaction terms for 3 embarked * 5 farecat
+emb_fare_int <- as.data.frame(matrix(rep(0,nrow(all)*15), nrow = nrow(all), ncol = 15))
+
+col_names <- character()
+for (port in c("C", "Q", "S")){
+  for(cat in 1:5){
+   col_names <-  c(col_names, paste("Embarked",port,":","Fare_cat",cat,sep = ""))
+  }
+}
+#change col names
+colnames(emb_fare_int) <- col_names
+
+i = 1
+for (port in c("C", "Q", "S")){
+  for(cat in 1:5){
+    emb_fare_int[i] <- as.numeric(all$Embarked == port & all$Fare_cat == cat)
+    i <- i + 1
+  }
+}
+
+
+check <- cbind(all[,c("Embarked", "Fare_cat")], emb_fare_int) 
+str(check) #ALL GOOD! 
+
+```
+
+Concatenate interaction terms to whole dataset
+```{r}
+all <- cbind(all, emb_fare_int)
+
+```
+
+
+# Age
+```{r}
+ggplot(all[all$isTrain == 1,], aes(x = Age, fill = Survived))+ 
+  geom_histogram(bins = 10) + 
+  ylab("Passenger Count") +
+  ggtitle("Age Distributions")+
+  facet_grid(~Survived)
+```
+
+There are negative ages! Interesting
+```{r}
+#Change negative ages to average of age
+all$Age[all$Age < 0] <- median(all$Age)
+
+
+#investigate distribution of young folks who survived
+#(notice the small spike on the left hand side)
+all %>%
+  filter(isTrain == 1 & Age < 18) %>%
+  mutate(rounded_age = round(Age)) %>%
+  group_by(rounded_age, Survived) %>%
+  summarise(n = n()) %>% #still grouped by Age
+  mutate(age_group_tot = sum(n),
+         age_sur_per = n/age_group_tot) %>%
+
+  ggplot(aes(x = rounded_age,y= age_sur_per, fill = Survived)) +
+    geom_bar(stat = "identity") +
+    facet_grid(~Survived) +
+    xlab("Rounded Age of Child") +
+    ylab("% of children in specified age") +
+    ggtitle("Age Distributions of Minors")
+```
+
+Seems to be bimodal distribution. However, decided to not include the following code because this leads to overfitting. These only account for a small percentage of the data.
+
+```{r}
+# #make dummy variable for young kids (< 6 years old)
+#   #do not make dummy variable for older teens. may be just samplingn issues.
+# all$isAdolescent <- 0
+# all$isAdolescent[all$Age <= 6] <- 1
+# table("Young child" = all$isAdolescent, all$Survived) #remember, there variety of passengers
+# #adding this variable might add a good effect.
+#   
+```
+
+
+```{r}
+#categorize age
+#AGAIN, do NOT make cuts based on entire dataset. 
+cuts_age <- quantile(all[all$isTrain ==1, ]$Age, probs = seq(0,1,1/7), na.rm = T)
+print("Bins for categorizing age")
+cuts_age 
+
+#change lowest min of cuts_age to 0
+cuts_age[1] <- 0
+
+cuts_age
+
+age_cat_labels <- c("<16", "16-21", ">21-26", ">26-30", ">30-35", ">35-45", ">45-max(80)")
+
+```
+
+```{r}
+#use numeric for data
+all$age_cat <- factor(cut(all$Age, cuts_age, labels = seq(1,7,1),
+                          include.lowest = T, right = T))
+#summary(all$age_cat)
+#use age labels for graphing
+ggplot(all[all$isTrain == 1,], aes(x = factor(age_cat, labels = age_cat_labels), fill = factor(Pclass, labels = c("First", "Second", "Third")))) +
+  geom_bar(stat ="count") + 
+  theme(axis.text.x = element_text(angle = 45, hjust =1)) +
+  xlab("Age Categories") + 
+  ylab("Passenger Count") + 
+  ggtitle("Comparison of Survival Rate by Age and Passenger Class") + 
+  facet_grid(~Survived) + 
+  guides(fill=guide_legend(title="Passenger Class"))
+```
+
+
+There is again some patterns, but will not look further into this because this will lead to overfitting.
+
+# Name
+Investigate names.
+```{r}
+
+#Extract the mr. mrs. whatever. 
+tail(unique(all$Name))
+```
+
+```{r}
+
+# #split ..very messy
+# test <- strsplit("Ware, Mr. Frederick", ", ")
+# test2 <- strsplit(test[[1]][2], ". ")
+# 
+# #have to manually delete everything else..not intuitive
+# first_names <- sub(pattern = ".*, ", "", x = "ware, Mr. Frederick")
+# title <- sub(pattern= "\\. .*", "", x = first_names)
+# title
+
+all$name_title <- str_extract(all$Name, pattern = "([A-Za-z]+)\\.")
+title <- all %>% group_by(name_title) %>% summarise(n = n()) %>% arrange(desc(n))
+#title 
+
+
+title_surv <- table("Titles" = all$name_title, "Survived" = all$Survived)
+title_surv
+```
+Note that all reverends died. Also the Captain did not survive. (Captain went down with the ship)!
+Also there are many titls..let's group them!
+
+```{r}
+all$name_title_rev <- gsub(pattern = "Dr.|Col.|Major.|Mlle.|Countess.|Don.|Dona.|Jonkheer.|Lady.|Mme.|Sir.",
+                           replacement = "Rare_Nobility", x = all$name_title)
+all$name_title_rev <- gsub(pattern = "Ms.", replacement = "Miss.", x = all$name_title_rev)
+
+print("Frequency table of name titles")
+table(all$name_title_rev)
+```
+
+
+```{r}
+#see correlation between title and survival.
+
+ggplot(all[all$isTrain == 1,], aes(x = name_title_rev, fill = factor(Survived, labels = c("Died", "Survived")))) +
+  geom_bar(stat ="count", position = "stack") + 
+  facet_grid(~Survived) + 
+  theme(axis.text.x = element_text(angle = 45, hjust =1)) +
+  xlab("Title of Passenger") +  ylab("Passenger Count") + 
+  ggtitle("Comparison of Survival Rate by Name Title") + 
+  guides(fill=guide_legend(title="Survived"))
+
+```
+
+If you're a Mr....You'll probably not survive
+```{r}
+#Change to numeric so model cna read them
+
+title_levels <- c("Mr.", "Miss.", "Mrs.", "Master.", "Rev.", "Capt.", "Rare_Nobility")
+all$title_cat <- factor(all$name_title_rev, levels = title_levels, labels = 1:7)
+table(all$title_cat) 
+```
+
+
+# Name and Age
+```{r}
+#Mister and Age
+all %>%
+  filter(isTrain == TRUE & title_cat == 1) %>%
+  group_by(title_cat, age_cat, Survived) %>%
+  summarise(n = n()) %>%
+  ungroup() %>%
+  group_by(age_cat) %>%
+  mutate(age_cat_sum = sum(n),
+         age_cat_per = round(n/age_cat_sum,2)) %>%
+  ggplot(aes(x = factor(age_cat, labels = age_cat_labels), y = age_cat_per, fill = Survived)) +
+    geom_bar(stat = "identity", position = "identity") +
+    xlab("Age Categories") +
+    ylab("% of Passengers per Age Category") + 
+    ggtitle("Comparison of Survival Rate by Age Categories")  +
+    guides(fill=guide_legend(title="Survived"))  +
+    theme(axis.text.x = element_text(angle = 45, hjust =1)) +
+    facet_grid(~Survived)  
+```
+
+This almost shows same pattern as age so no need to make interaction term
+
+
+# Final Checks
+# Make Sex/Embarked variable numeric before modeling
+```{r}
+#instead of simple 1 0. let's trying using one hot encoding
+#separtaes male and fmelae into sex_male, sex_female
+all <- dummy.data.frame(all, names = c("Sex", "Embarked"), sep = "_") 
+```
+
+
+
+# Check for Missing Data in Final Train
+```{r}
+
+#change target variable back to numeric
+all$Survived <- ifelse(all$Survived == "Survived", 1, 
+                       ifelse(all$Survived == "Died", 0, NA))
+
+final_train <- all %>% filter(isTrain == 1) %>% 
+  select(-c(Age, Name, name_title, name_title_rev, SibSp, Parch, Ticket, Fare, TicketNumber))
+final_test <- all %>% filter(isTrain == 0) %>% 
+  select(-c(Survived, Age, Name, name_title, name_title_rev, SibSp, Parch, Ticket, Fare, TicketNumber))
+
+
+missing_dat_final_tr <- colMeans(is.na(final_train))
+#missing_dat_final_tr
+paste("% of Missing data in training:", sum(missing_dat_final_tr), "%")
+
+missing_dat_final_te <- colMeans(is.na(final_test))
+missing_dat_final_te
+paste("% of Missing data in testing:", sum(missing_dat_final_te), "%")
+
+```
+
+```{r}
+#save files for modeling.
+write.csv(final_train, "final_train.csv", row.names =  F)
+write.csv(final_test, "final_test.csv", row.names =  F)
+```
+
+-------End of Cleaning + EDA----------
+(Move to Python for modeling and model evaluation)
+
+
+
